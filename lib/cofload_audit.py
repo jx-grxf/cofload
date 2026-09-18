@@ -29,20 +29,27 @@ def _run(cmd, timeout=60) -> str:
 
 
 def installed_plugins() -> list:
-    """Name, always-on token cost and skill names for each enabled plugin."""
+    """Name, always-on token cost, skills and enabled state for each plugin.
+
+    A disabled plugin still appears in the listing but costs nothing, so its
+    state has to be read rather than assumed.
+    """
     listing = _run(["claude", "plugin", "list"])
-    names = re.findall(r"❯\s+(\S+)", listing)
     plugins = []
-    for name in names:
-        detail = _run(["claude", "plugin", "details", name], timeout=45)
-        if not detail:
+    blocks = re.split(r"\n\s*❯\s+", listing)[1:]
+    for block in blocks:
+        name = block.splitlines()[0].strip()
+        if not name:
             continue
-        cost = re.search(r"Always-on:\s*~?([\d,]+)\s*tok", detail)
-        skills = re.search(r"Skills \(\d+\)\s+(.+)", detail)
+        enabled = "disabled" not in block.split("Status:")[1][:30] if "Status:" in block else True
+        detail = _run(["claude", "plugin", "details", name], timeout=45)
+        cost = re.search(r"Always-on:\s*~?([\d,]+)\s*tok", detail or "")
+        skills = re.search(r"Skills \(\d+\)\s+(.+)", detail or "")
         plugins.append({
             "name": name,
-            "tokens": int(cost.group(1).replace(",", "")) if cost else 0,
-            "skills": [s.strip() for s in skills.group(1).split(",")] if skills else [],
+            "tokens": int(cost.group(1).replace(",", "")) if cost and enabled else 0,
+            "skills": [x.strip() for x in skills.group(1).split(",")] if skills else [],
+            "enabled": enabled,
         })
     return plugins
 
@@ -78,36 +85,38 @@ def instruction_files(cwd: Path) -> list:
     return found
 
 
-def usage_counts(days: int = 60, extra_terms=()) -> dict:
-    """How often each MCP server and skill actually appears in transcripts.
+def usage_counts(days: int = 60) -> dict:
+    """How often each MCP server, skill and agent appears in transcripts.
 
-    Counts are a floor, not a census: they come from matching patterns in
-    transcript files, so a component can be used in a way this misses. That is
-    why the report says "no calls found" rather than "unused".
+    Only structured call records count: `"name":"mcp__<server>__<tool>"`,
+    `"name":"Skill","input":{"skill":"<name>"`, and `"subagent_type":"<name>"`.
+    An earlier version also counted bare occurrences of a plugin's name in the
+    transcript text, which reported 40,409 uses for a plugin called once - the
+    system prompt lists every plugin and is repeated on every turn.
+
+    Counts are a floor, not a census: a component can be used in a way these
+    patterns miss, which is why the report says "no calls found", not "unused".
     """
-    counts = {"mcp": {}, "skill": {}, "text": {}}
+    counts = {"mcp": {}, "skill": {}, "agent": {}}
     if not TRANSCRIPTS.is_dir():
         return counts
     cutoff = time.time() - days * 86400
-    files = [p for p in TRANSCRIPTS.rglob("*.jsonl")
-             if p.stat().st_mtime >= cutoff]
-    mcp_pat = re.compile(rb'"name":"mcp__([a-z0-9_-]+)__')
-    skill_pat = re.compile(rb'"skill":"([a-zA-Z0-9:_-]+)"')
-    for path in files:
+    patterns = {
+        "mcp": re.compile(rb'"name":"mcp__([a-zA-Z0-9_-]+)__'),
+        "skill": re.compile(rb'"name":"Skill","input":\{"skill":"([a-zA-Z0-9:_-]+)"'),
+        "agent": re.compile(rb'"subagent_type":"([a-zA-Z0-9:_-]+)"'),
+    }
+    for path in TRANSCRIPTS.rglob("*.jsonl"):
         try:
+            if path.stat().st_mtime < cutoff:
+                continue
             blob = path.read_bytes()
         except OSError:
             continue
-        for m in mcp_pat.finditer(blob):
-            key = m.group(1).decode()
-            counts["mcp"][key] = counts["mcp"].get(key, 0) + 1
-        for m in skill_pat.finditer(blob):
-            key = m.group(1).decode()
-            counts["skill"][key] = counts["skill"].get(key, 0) + 1
-        for term in extra_terms:
-            hits = blob.count(term.encode())
-            if hits:
-                counts["text"][term] = counts["text"].get(term, 0) + hits
+        for kind, pat in patterns.items():
+            for m in pat.finditer(blob):
+                key = m.group(1).decode()
+                counts[kind][key] = counts[kind].get(key, 0) + 1
     return counts
 
 
@@ -122,16 +131,22 @@ def report(cwd: Path, days: int = 60) -> dict:
     plugins = installed_plugins()
     servers = mcp_servers()
     files = instruction_files(cwd)
-    # Plugin skills also appear as plain text (an agent name, a slash command),
-    # so the plugin's own short name is searched literally as a second source.
-    used = usage_counts(days, extra_terms=[p["name"].split("@")[0] for p in plugins])
+    used = usage_counts(days)
 
     for p in plugins:
         short = p["name"].split("@")[0]
-        names = {_norm(n) for n in [short, *p["skills"]]}
-        p["uses"] = sum(n for k, n in used["skill"].items() if _norm(k) in names)
+        own = {_norm(n) for n in [short, *p["skills"]]}
+
+        def belongs(key: str) -> bool:
+            # A plugin component is logged either bare ("bulk-read") or
+            # namespaced ("cofload:bulk-read"); both must resolve to the plugin.
+            prefix, _, rest = key.partition(":")
+            return (_norm(key) in own or _norm(rest) in own
+                    or (rest and _norm(prefix) == _norm(short)))
+
+        p["uses"] = sum(n for k, n in used["skill"].items() if belongs(k))
+        p["uses"] += sum(n for k, n in used["agent"].items() if belongs(k))
         p["uses"] += sum(n for k, n in used["mcp"].items() if _norm(short) in _norm(k))
-        p["uses"] += used["text"].get(short, 0)
 
     for s in servers:
         key = _norm(s["name"].replace("plugin:", ""))

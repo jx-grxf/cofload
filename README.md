@@ -117,25 +117,32 @@ with every turn. `cofload audit` weighs that fixed load against how often each
 one is actually called in your transcripts, and only then suggests removals:
 
 ```
-  plugins            6,938 tok
-    vercel@claude-plugins-official     3,987 tok   1 use in 60d
-    figma@claude-plugins-official      2,257 tok   no calls found in 60d
-  instructions       5,631 tok
-    AGENTS.md                          2,625 tok
-  mcp servers            8 connected
-    railway                                        149 calls in 60d
-    apple-mail                                     107 calls in 60d
+PLUGINS                                                    4,603 tok / session
+  ██████████████████  vercel                   3,987t   8 uses
+  ██················  codex                      449t   no calls found
+  1 disabled: figma
 
-  measured total   ~12,569 tok, re-sent with every turn of every session
+INSTRUCTIONS                                                  5,631 tok / turn
+  ██████████████████  AGENTS.md                2,625t   in myrepo
+  ███████████·······  MEMORY.md                1,559t   in memory
 
-what to change, largest first
-  → claude plugin disable figma@claude-plugins-official
-    2,257 tok/session, no calls found in 60 days
+MCP SERVERS                                                        7 connected
+  ██████████████████  railway                           149 calls
+  █·················  apple-tools                       9 calls
+
+MEASURED TOTAL                                                     ~10,234 tok
+  re-sent with every turn of every session in this repository
+
+WHAT TO CHANGE                                                   largest first
+  → trim AGENTS.md
+    2,625 tok every turn; move detail into files the agent opens on demand
 ```
 
-Usage counts are a floor, not a census — they come from matching patterns in
-transcripts, which is why the report says "no calls found" rather than "unused".
-Check before you disable something.
+Usage counts come from structured call records in transcripts — `mcp__…` tool
+names, `Skill` invocations, `subagent_type` — so they are a floor, not a census.
+That is why the report says "no calls found" rather than "unused". Check before
+you disable something. Disabled plugins are shown as disabled and counted as
+zero, because that is what they cost.
 
 ## Stats
 

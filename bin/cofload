@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import cofload_core as core  # noqa: E402
+import cofload_ui as ui  # noqa: E402
 
 BYPASS_TTL = 1800  # half an hour: long enough for an edit, short enough to forget
 
@@ -148,8 +149,9 @@ def cmd_read(argv) -> int:
                      chars_in=total_bytes, chars_out=len(answer),
                      seconds=round(time.time() - started, 1))
     print(answer)
-    print(f"\n--\n{total_lines} lines via {backend.name}:{backend.model} "
-          f"in {time.time() - started:.1f}s", file=sys.stderr)
+    sys.stdout.flush()
+    print(ui.c(f"\n── {total_lines} lines read by {backend.name} · {backend.model} "
+               f"· {time.time() - started:.1f}s", "grey"), file=sys.stderr)
     return 0
 
 
@@ -201,8 +203,8 @@ def cmd_write(argv) -> int:
                      paths=[target.name], lines=len(lines),
                      chars_out=sum(len(x) for x in lines),
                      seconds=round(time.time() - started, 1))
-    print(f"cofload: wrote {target} ({len(lines)} lines) via "
-          f"{backend.name}:{backend.model}", file=sys.stderr)
+    print(ui.c(f"── wrote {target} · {len(lines)} lines · {backend.name}", "grey"),
+          file=sys.stderr)
     return 0
 
 
@@ -219,50 +221,65 @@ def cmd_allow(argv) -> int:
 def cmd_doctor(_argv) -> int:
     cfg = core.load_config()
     root = core.repo_root()
-    print(f"repository      {root}")
-    print(f"config          {core.USER_CONFIG if core.USER_CONFIG.exists() else '(no user config)'}"
-          f" + {'.cofload.json' if (root / core.CONFIG_NAME).exists() else '(no repo config)'}")
-    print(f"privacy         {cfg.get('privacy')}  -> tiers {sorted(core.allowed_tiers(cfg))}")
-    print(f"min_lines       {cfg.get('min_lines')}")
-    print()
     chosen, why = core.usable_backend(cfg)
+
+    ui.title(f"cofload doctor · {root.name}", cfg.get("privacy", "private"))
+    ui.kv("repository", str(root).replace(str(Path.home()), "~"))
+    repo_cfg = "yes" if (root / core.CONFIG_NAME).exists() else "no"
+    user_cfg = "yes" if core.USER_CONFIG.exists() else "no"
+    ui.kv("config", f"repo: {repo_cfg} · user: {user_cfg}")
+    ui.kv("thresholds", f"{cfg.get('min_lines')} lines / "
+                        f"{int(cfg.get('min_bytes', 0)) // 1024} KB")
+    ui.kv("privacy", f"{cfg.get('privacy')} → {', '.join(sorted(core.allowed_tiers(cfg)))}")
+
+    ui.section("backends")
+    allowed = core.allowed_tiers(cfg)
     for name in core.AUTO_ORDER + ["command"]:
         b = core.detect(name, cfg)
         tier = core.TIERS.get(name, "private")
-        mark = "->" if chosen and chosen.name == name else "  "
-        state = "available" if b else "not available"
-        blocked = "" if tier in core.allowed_tiers(cfg) else "  (blocked by privacy)"
-        print(f"{mark} {name:<12} {state:<14} {tier:<9} "
-              f"{(b.model if b else ''):<40}{blocked}")
+        active = chosen and chosen.name == name
+        if b and tier in allowed:
+            mark, level = ("▶" if active else "•"), ("good" if active else "info")
+            state = "active" if active else "available"
+        elif b:
+            mark, level, state = "•", "warn", f"blocked by privacy={cfg.get('privacy')}"
+        else:
+            mark, level, state = "·", "info", "not available"
+        print("  " + ui.c(mark, "green" if active else "grey") + " "
+              + ui.cell(name, 13, *(("bold",) if active else ()))
+              + ui.cell(state, 28, {"good": "green", "warn": "yellow",
+                                    "bad": "red"}.get(level, "grey"))
+              + ui.cell(tier, 10, "grey")
+              + ui.c((b.model if b else "")[:38], "grey"))
+
     print()
     if chosen:
-        print(f"active: {chosen.name} / {chosen.model}")
+        print("  " + ui.c(f"active: {chosen.name} / {chosen.model}", "green"))
         if "--probe" in sys.argv:
             started = time.time()
             try:
                 out = core.run_worker(chosen, "Reply with exactly one word: OK", cfg)
-                print(f"probe:  {out.strip()[:40]!r} in {time.time() - started:.1f}s")
+                print("  " + ui.c(f"probe:  {out.strip()[:40]!r} in "
+                                  f"{time.time() - started:.1f}s", "green"))
             except core.CofloadError as exc:
-                print(f"probe:  FAILED - {exc}")
+                print("  " + ui.c(f"probe:  FAILED — {exc}", "red"))
                 return 1
     else:
-        print(f"no active backend: {why}")
-        print("the guard will not block anything while this is the case.")
+        print("  " + ui.c(f"no active backend: {why}", "yellow"))
+        ui.note("nothing will be blocked while this is the case")
+    print()
     return 0
 
 
 def cmd_stats(argv) -> int:
     path = core.CACHE_DIR / "usage.jsonl"
-    if not path.exists():
-        print("nothing delegated yet")
-        return 0
-
     records = []
-    for raw in path.read_text().splitlines():
-        try:
-            records.append(json.loads(raw))
-        except ValueError:
-            continue
+    if path.exists():
+        for raw in path.read_text().splitlines():
+            try:
+                records.append(json.loads(raw))
+            except ValueError:
+                continue
     if not records:
         print("nothing delegated yet")
         return 0
@@ -275,60 +292,68 @@ def cmd_stats(argv) -> int:
             print(f"nothing delegated in the last {days} days")
             return 0
 
-    reads = [r for r in records if r.get("kind") == "read"]
-    writes = [r for r in records if r.get("kind") == "write"]
-    failed = [r for r in records if r.get("ok") is False]
     done = [r for r in records if r.get("ok") is not False]
+    failed = [r for r in records if r.get("ok") is False]
+    kinds = {}
+    for r in records:
+        kinds[r.get("kind", "?")] = kinds.get(r.get("kind", "?"), 0) + 1
 
     tokens_in = sum(core.est_tokens(r.get("chars_in", 0)) for r in done)
     tokens_out = sum(core.est_tokens(r.get("chars_out", 0)) for r in done)
     saved = max(0, tokens_in - tokens_out)
     lines = sum(r.get("lines", 0) for r in done)
     seconds = sum(r.get("seconds", 0) for r in done)
+    timed = [r for r in done if r.get("seconds")]
     first = min(r.get("ts", 0) for r in records)
-    span_days = max(1, int((time.time() - first) // 86400))
+    span = max(1, int((time.time() - first) // 86400))
 
     if "--json" in argv:
         print(json.dumps({
-            "reads": len(reads), "writes": len(writes), "failed": len(failed),
+            "by_kind": kinds, "failed": len(failed),
             "tokens_in_est": tokens_in, "tokens_returned_est": tokens_out,
             "tokens_saved_est": saved, "lines": lines,
             "seconds_waited": round(seconds, 1), "since_ts": first,
         }, indent=2))
         return 0
 
-    since = time.strftime("%Y-%m-%d", time.localtime(first))
-    print(f"since {since}  ({span_days} day{'s' if span_days != 1 else ''})")
-    print()
-    print(f"  delegated        {len(reads)} reads, {len(writes)} writes"
-          + (f", {len(failed)} failed" if failed else ""))
-    print(f"  lines handled    {lines:,}")
-    print(f"  sent to worker   ~{tokens_in:,} tokens")
-    print(f"  came back        ~{tokens_out:,} tokens")
+    since = time.strftime("%d %b %Y", time.localtime(first))
+    ui.title("cofload stats", f"since {since} · {span}d")
+
+    ui.section("delegated", "  ".join(f"{n} {k}" for k, n in sorted(kinds.items())))
     if tokens_in:
-        print(f"  context saved    ~{saved:,} tokens  "
-              f"({saved * 100 // tokens_in}% of what a direct read would have cost)")
-        # A saved token is not saved once: it would have sat in context and been
-        # re-sent with every later turn. This is the conservative, one-shot view.
-        print(f"                   = {saved / 200_000:.1f} full 200k context windows")
-    timed = [r for r in done if r.get("seconds")]
-    print(f"  time waited      {int(seconds) // 60}m {int(seconds) % 60}s"
-          + (f"  (avg {seconds / len(timed):.1f}s per call)" if timed else ""))
-    print()
+        cells = 30
+        kept = int(round(tokens_out / tokens_in * cells)) if tokens_in else 0
+        kept = max(1, kept) if tokens_out else 0
+        print("  " + ui.c("█" * (cells - kept), "green")
+              + ui.c("█" * kept, "yellow")
+              + f"  {saved * 100 // tokens_in}% " + ui.c("of a direct read avoided", "grey"))
+        print()
+        ui.kv("would cost", f"~{ui.fmt(tokens_in)} tokens", 18)
+        ui.kv("came back", f"~{ui.fmt(tokens_out)} tokens", 18)
+        ui.kv("context saved", ui.c(f"~{ui.fmt(saved)} tokens", "green", "bold")
+              + ui.c(f"   ≈ {saved / 200_000:.1f} × a 200k window", "grey"), 18)
+    ui.kv("lines handled", ui.fmt(lines), 18)
+    ui.kv("time waited", f"{int(seconds) // 60}m {int(seconds) % 60}s"
+          + (ui.c(f"   avg {seconds / len(timed):.1f}s per call", "grey") if timed else ""), 18)
 
     by_backend = {}
     for r in done:
-        key = f"{r.get('backend', '?')}"
-        agg = by_backend.setdefault(key, {"n": 0, "s": 0.0, "saved": 0})
+        agg = by_backend.setdefault(r.get("backend", "?"),
+                                    {"n": 0, "timed": 0, "s": 0.0, "saved": 0})
         agg["n"] += 1
-        agg["s"] += r.get("seconds", 0)
+        if r.get("seconds"):
+            agg["timed"] += 1
+            agg["s"] += r["seconds"]
         agg["saved"] += max(0, core.est_tokens(r.get("chars_in", 0))
                             - core.est_tokens(r.get("chars_out", 0)))
-    print(f"  {'backend':<14}{'calls':>6}{'avg':>8}{'saved':>12}")
-    for name, agg in sorted(by_backend.items(), key=lambda kv: -kv[1]["saved"]):
-        avg = agg["s"] / agg["n"] if agg["n"] else 0
-        print(f"  {name:<14}{agg['n']:>6}{avg:>7.1f}s"
-              f"{agg['saved']:>11,}t")
+    if by_backend:
+        top = max(a["saved"] for a in by_backend.values()) or 1
+        ui.section("by backend")
+        for name, agg in sorted(by_backend.items(), key=lambda kv: -kv[1]["saved"]):
+            avg = agg["s"] / agg["timed"] if agg["timed"] else 0
+            print("  " + ui.bar(agg["saved"], top, 18) + "  "
+                  + ui.cell(name, 16) + f"{ui.fmt(agg['saved']) + 't':>10}"
+                  + ui.c(f"   {agg['n']} calls · avg {avg:.1f}s", "grey"))
 
     by_file = {}
     for r in done:
@@ -337,23 +362,28 @@ def cmd_stats(argv) -> int:
             agg["n"] += 1
             agg["saved"] += max(0, core.est_tokens(r.get("chars_in", 0))
                                 - core.est_tokens(r.get("chars_out", 0)))
-    top = sorted(by_file.items(), key=lambda kv: -kv[1]["saved"])[:5]
-    if top:
-        print()
-        print(f"  {'most delegated':<24}{'calls':>6}{'saved':>12}")
-        for name, agg in top:
-            print(f"  {name[:23]:<24}{agg['n']:>6}{agg['saved']:>11,}t")
+    top_files = sorted(by_file.items(), key=lambda kv: -kv[1]["saved"])[:6]
+    if top_files:
+        top = top_files[0][1]["saved"] or 1
+        ui.section("most delegated")
+        for name, agg in top_files:
+            print("  " + ui.bar(agg["saved"], top, 18, "blue") + "  "
+                  + ui.cell(name, 16) + f"{ui.fmt(agg['saved']) + 't':>10}"
+                  + ui.c(f"   {agg['n']}×", "grey"))
 
     if failed:
-        print()
-        print(f"  {len(failed)} failed delegation(s), most recent:")
+        ui.section("failed", ui.verdict(f"{len(failed)}", "bad"))
         for r in failed[-3:]:
-            when = time.strftime("%m-%d %H:%M", time.localtime(r.get("ts", 0)))
-            print(f"    {when}  {r.get('backend', '?')}: {r.get('error', '')[:70]}")
+            when = time.strftime("%d %b %H:%M", time.localtime(r.get("ts", 0)))
+            print(f"  {ui.c(when, 'grey')}  {r.get('backend', '?')}: "
+                  f"{ui.verdict(r.get('error', '')[:60], 'bad')}")
 
     print()
-    print("  token counts are estimates (characters / 4)")
+    ui.note("token counts are estimates (characters / 4); each token is counted once, "
+            "though context is re-sent every turn")
+    print()
     return 0
+
 
 
 RUN_PROMPT = """You are reading the output of a command that failed or ran long.
@@ -397,8 +427,9 @@ def cmd_run(argv) -> int:
     # Short output is cheaper to read than to delegate: hand it straight back.
     if len(lines) < int(cfg.get("min_lines", 350)) and len(output) < 20_000:
         print(output, end="" if output.endswith("\n") else "\n")
-        print(f"--\nexit {proc.returncode} in {elapsed:.1f}s (passed through, "
-              f"{len(lines)} lines)", file=sys.stderr)
+        sys.stdout.flush()
+        print(ui.c(f"── exit {proc.returncode} · {elapsed:.1f}s · {len(lines)} lines "
+                   f"passed through unchanged", "grey"), file=sys.stderr)
         return proc.returncode
 
     backend, why = core.usable_backend(cfg)
@@ -436,8 +467,10 @@ def cmd_run(argv) -> int:
                      chars_out=len(answer),
                      seconds=round(time.time() - delegation_started, 1))
     print(answer)
-    print(f"--\nexit {proc.returncode}; {len(lines)} lines of output read by "
-          f"{backend.name} in {time.time() - delegation_started:.1f}s", file=sys.stderr)
+    sys.stdout.flush()
+    print(ui.c(f"── exit {proc.returncode} · {len(lines)} lines read by "
+               f"{backend.name} · {time.time() - delegation_started:.1f}s", "grey"),
+          file=sys.stderr)
     return proc.returncode
 
 
@@ -457,64 +490,82 @@ def cmd_audit(argv) -> int:
     import cofload_audit as audit
 
     days = int(next((a.split("=")[1] for a in argv if a.startswith("--days=")), 60))
-    print("reading plugin inventory and transcripts, this takes a moment...",
-          file=sys.stderr)
+    print(ui.c("  reading plugin inventory and transcripts…", "grey"),
+          file=sys.stderr, flush=True)
     rep = audit.report(Path.cwd(), days)
-
     total = rep["plugin_tokens"] + rep["file_tokens"]
-    print(f"fixed cost of every session in {Path.cwd().name}")
-    print()
-    print(f"  plugins          {rep['plugin_tokens']:>7,} tok")
-    for pl in rep["plugins"]:
-        if pl["tokens"] < 1:
-            continue
-        uses = (f"{pl['uses']} use{'s' if pl['uses'] != 1 else ''} in {days}d"
-                if pl["uses"] else f"no calls found in {days}d")
-        print(f"    {pl['name'][:44]:<46}{pl['tokens']:>6,} tok   {uses}")
-    print()
-    print(f"  instructions     {rep['file_tokens']:>7,} tok")
+
+    ui.title(f"cofload audit · {Path.cwd().name}", f"{days} day window")
+
+    active = [p for p in rep["plugins"] if p["tokens"] > 0]
+    off = [p for p in rep["plugins"] if p["tokens"] == 0 and not p.get("enabled", True)]
+    ui.section("plugins", f"{ui.fmt(rep['plugin_tokens'])} tok / session")
+    peak = max([p["tokens"] for p in active] or [1])
+    for pl in active:
+        used = pl["uses"]
+        level = "good" if used else ("bad" if pl["tokens"] >= 1000 else "warn")
+        label = f"{used} use{'s' if used != 1 else ''}" if used else "no calls found"
+        print("  " + ui.bar(pl["tokens"], peak, 18, "cyan" if used else "yellow")
+              + "  " + ui.cell(pl["name"].split("@")[0], 22)
+              + f"{ui.fmt(pl['tokens']) + 't':>9}   " + ui.verdict(label, level))
+    if off:
+        ui.note(f"{len(off)} disabled: " + ", ".join(p["name"].split("@")[0] for p in off))
+
+    ui.section("instructions", f"{ui.fmt(rep['file_tokens'])} tok / turn")
+    peak = max([f["tokens"] for f in rep["files"]] or [1])
     for f in rep["files"]:
-        print(f"    {str(f['path']).replace(str(Path.home()), '~')[:44]:<46}"
-              f"{f['tokens']:>6,} tok")
-    print()
-    print(f"  mcp servers      {len(rep['servers']):>7} connected")
+        name = Path(f["path"]).name
+        parent = Path(f["path"]).parent.name
+        level = "bad" if f["tokens"] > 2000 else ("warn" if f["tokens"] > 1000 else "good")
+        print("  " + ui.bar(f["tokens"], peak, 18, "cyan")
+              + "  " + ui.cell(f"{name}", 22)
+              + f"{ui.fmt(f['tokens']) + 't':>9}   "
+              + ui.c(f"in {parent}", "grey"))
+
+    ui.section("mcp servers", f"{len(rep['servers'])} connected")
+    peak = max([s["uses"] for s in rep["servers"]] or [1])
     for srv in rep["servers"]:
-        uses = (f"{srv['uses']} call{'s' if srv['uses'] != 1 else ''} in {days}d"
-                if srv["uses"] else f"no calls in {days}d")
-        print(f"    {srv['name'][:44]:<46}{'':>6}       {uses}")
-    print()
-    print(f"  measured total   ~{total:,} tok, re-sent with every turn of every session")
-    print("  (mcp tool names add to this; they are not counted here)")
+        used = srv["uses"]
+        label = f"{used} call{'s' if used != 1 else ''}" if used else "no calls found"
+        print("  " + ui.bar(used, peak, 18, "cyan" if used else "yellow")
+              + "  " + ui.cell(srv["name"], 22) + f"{'':>9}   "
+              + ui.verdict(label, "good" if used else "warn"))
+    ui.note("mcp tool names load into every session; they are not counted above")
+
+    ui.section("measured total", f"~{ui.fmt(total)} tok")
+    ui.note("re-sent with every turn of every session in this repository")
 
     actions = []
     for pl in rep["plugins"]:
         if pl["tokens"] >= 300 and not pl["uses"]:
-            actions.append((pl["tokens"],
-                            f"claude plugin disable {pl['name']}",
-                            f"{pl['tokens']:,} tok/session, no calls found in {days} days"))
+            actions.append((pl["tokens"], f"claude plugin disable {pl['name']}",
+                            f"{ui.fmt(pl['tokens'])} tok/session, no calls found in {days} days"))
     for srv in rep["servers"]:
         if not srv["uses"] and "plugin:" not in srv["name"]:
-            actions.append((250, f'add "{srv["name"]}" to disabledMcpServers in settings.json',
+            actions.append((250, f'disable the "{srv["name"]}" MCP server',
                             f"no calls found in {days} days"))
     for f in rep["files"]:
         if f["tokens"] > 2000:
-            actions.append((f["tokens"] // 2,
-                            f"trim {Path(f['path']).name}",
-                            f"{f['tokens']:,} tok every turn; move detail into files "
-                            f"the agent opens on demand"))
+            actions.append((f["tokens"] // 2, f"trim {Path(f['path']).name}",
+                            f"{ui.fmt(f['tokens'])} tok every turn; move detail into "
+                            f"files the agent opens on demand"))
     if not (Path.cwd() / ".claude" / "settings.json").exists():
         actions.append((0, "cofload harden --write",
                         "no permission deny rules; one stray read of node_modules "
                         "can cost more than everything above"))
 
-    print()
     if actions:
-        print("what to change, largest first")
+        ui.section("what to change", "largest first")
         for _, cmd, why in sorted(actions, key=lambda a: -a[0]):
-            print(f"  → {cmd}")
-            print(f"    {why}")
+            print("  " + ui.c("→ ", "cyan") + ui.c(cmd, "bold"))
+            print("    " + ui.c(why, "grey"))
     else:
-        print("nothing obviously wasteful found")
+        ui.section("what to change")
+        ui.note("nothing obviously wasteful found")
+    print()
+    ui.note("usage counts come from transcript call records: a floor, not a census — "
+            "check before disabling")
+    print()
     return 0
 
 
@@ -553,10 +604,33 @@ COMMANDS = {"read": cmd_read, "write": cmd_write, "allow": cmd_allow,
             "harden": cmd_harden, "run": cmd_run}
 
 
+HELP = [
+    ("read  <file...> -- <question>", "answer a question about big files"),
+    ("run   \"<command>\" [-- <q>]", "run it, return the point of the output"),
+    ("write <spec> <target> [ref...]", "generate a predictable file onto disk"),
+    ("allow <file...>", "let the expensive model read it directly"),
+    ("doctor [--probe]", "which workers are available here"),
+    ("stats [--days=N] [--json]", "what delegation has actually saved"),
+    ("audit [--days=N]", "what every session costs before you type"),
+    ("harden [--write]", "deny rules for paths never worth reading"),
+]
+
+
 def main() -> int:
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print(__doc__)
+        ui.title("cofload", "keep the expensive model's context small")
+        for cmd, what in HELP:
+            print("  " + ui.cell(cmd, 32, "bold") + ui.c(what, "grey"))
+        print()
+        cfg = core.load_config()
+        backend, why = core.usable_backend(cfg)
+        ui.kv("worker", (ui.c(f"{backend.name} · {backend.model}", "green")
+                         if backend else ui.c(why, "yellow")), 10)
+        ui.kv("config", f"privacy={cfg.get('privacy')} · "
+                        f"min_lines={cfg.get('min_lines')} · "
+                        f"min_bytes={cfg.get('min_bytes')}", 10)
+        print()
         return 0
     cmd = COMMANDS.get(argv[0])
     if cmd is None:
