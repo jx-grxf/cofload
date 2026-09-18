@@ -1,8 +1,8 @@
 {
   "name": "cofload",
   "displayName": "Cofload",
-  "version": "0.1.0",
-  "description": "Route bulk file reads and boilerplate writes to a cheap model, enforced by hooks instead of instructions.",
+  "version": "0.2.0",
+  "description": "Keep context small: hooks route bulk reads and loud commands to a cheap model, and audit what every session costs.",
   "license": "MIT",
   "keywords": [
     "tokens",

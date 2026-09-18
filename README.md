@@ -1,8 +1,9 @@
 # cofload
 
-A Claude Code plugin that keeps large files out of the expensive model's context.
-A hook blocks bulk reads before they happen and points at a cheap worker model,
-which reads the file and answers in bullets.
+A Claude Code plugin that keeps the expensive model's context small. Hooks stop
+the two things that fill it — whole-file reads and commands that print their
+entire run — and route them to a cheap worker model that answers in bullets.
+It also measures what your session costs before you type a word.
 
 Measured on a real TypeScript file: **2,538 lines, ~26,700 estimated tokens
 direct, ~1,000 via the worker — 97% less context, 38 seconds.** The trade is
@@ -80,11 +81,61 @@ it, a round trip costs more time than the context is worth.
 
 ```bash
 cofload read src/handlers.ts -- "Which handlers touch the cache, and where?"
+cofload run "npm test"             # run it, get the failure, not the transcript
+cofload audit                      # what every session costs before you type
+cofload harden --write             # deny rules for paths never worth reading
 cofload write /tmp/spec.md src/schemas/board.ts src/schemas/journey.ts
 cofload allow src/handlers.ts      # I need the literal lines, lift the guard
 cofload doctor --probe             # what is available here, and does it answer
 cofload stats                      # what the delegation actually bought you
 ```
+
+## Two hooks, two habits
+
+**Whole-file reads.** A `Read` without `offset`/`limit` above 350 lines or 60 KB
+is refused, as is an unpiped `cat`/`head`/`tail`/`less`/`bat` on such a file.
+
+**Loud commands.** `npm test`, `tsc`, `cargo build`, `xcodebuild`, `git diff`
+and friends print thousands of lines that then sit in context for the rest of
+the session. The guard sends them through `cofload run`, which executes the same
+command, returns the same exit code, and hands back the failure instead of the
+transcript. Output below the threshold is passed through unchanged, so nothing
+is lost — and a pipe (`| tail -50`) always disables the check.
+
+```
+$ cofload run "npm test"
+- Exit code 1, one TypeScript error: TS2345 in src/v2/handlers.ts:1187
+- The 400 "compiling ... ok" lines are progress and unrelated to the failure
+--
+exit 1; 461 lines of output read by commandcode in 8.9s
+```
+
+## Audit: what a session costs before it starts
+
+Plugins, MCP servers and instruction files load at session start and are re-sent
+with every turn. `cofload audit` weighs that fixed load against how often each
+one is actually called in your transcripts, and only then suggests removals:
+
+```
+  plugins            6,938 tok
+    vercel@claude-plugins-official     3,987 tok   1 use in 60d
+    figma@claude-plugins-official      2,257 tok   no calls found in 60d
+  instructions       5,631 tok
+    AGENTS.md                          2,625 tok
+  mcp servers            8 connected
+    railway                                        149 calls in 60d
+    apple-mail                                     107 calls in 60d
+
+  measured total   ~12,569 tok, re-sent with every turn of every session
+
+what to change, largest first
+  → claude plugin disable figma@claude-plugins-official
+    2,257 tok/session, no calls found in 60 days
+```
+
+Usage counts are a floor, not a census — they come from matching patterns in
+transcripts, which is why the report says "no calls found" rather than "unused".
+Check before you disable something.
 
 ## Stats
 
@@ -133,6 +184,8 @@ Two skills ship with the plugin, so the agent knows when each applies:
   patch code. Reads and fresh files only.
 - **Delegate thinking.** A cheap model on low effort is an extractor. Anything
   architectural or safety-critical belongs in the expensive model's context.
+- **Rewrite your commands.** The guard refuses and explains; it never silently
+  changes what you asked to run.
 
 ## Honest numbers
 

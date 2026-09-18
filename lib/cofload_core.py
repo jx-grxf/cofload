@@ -48,6 +48,20 @@ DEFAULTS = {
     # allows free tiers that may train on what they are sent.
     "privacy": "private",
     "secret_patterns": DEFAULT_SECRET_PATTERNS,
+    # Commands whose output reliably runs into thousands of lines. The guard
+    # sends these through `cofload run`, which returns the failure instead of
+    # the transcript. Matched on the first two words, never on a piped or
+    # redirected command.
+    "loud_commands": [
+        "npm test", "npm run build", "npm run test", "pnpm test", "pnpm build",
+        "yarn test", "yarn build", "npx tsc", "tsc", "cargo build", "cargo test",
+        "swift build", "swift test", "xcodebuild", "gradle", "./gradlew",
+        "make", "pytest", "jest", "vitest", "eslint", "npx eslint",
+        "git diff", "git log",
+    ],
+    # Flags that already make a loud command quiet.
+    "quiet_flags": ["--stat", "--name-only", "--oneline", "--quiet", "-q",
+                    "--silent", "--version", "--help", "-n"],
     # Paths the guard leaves alone entirely.
     "skip_patterns": ["**/*.min.js", "**/*.lock", "**/*.snap"],
     "backends": {},

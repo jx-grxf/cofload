@@ -76,6 +76,31 @@ def check(path: Path, cfg: dict, how: str) -> None:
     )
 
 
+def check_loud(command: str, cfg: dict) -> None:
+    """Commands that reliably produce thousands of lines go through `cofload run`."""
+    stripped = command.strip()
+    # Returning rather than allowing: a quiet flag settles this check only, the
+    # file-size check below still gets its turn.
+    if any(flag in stripped.split() for flag in cfg.get("quiet_flags", [])):
+        return
+    for loud in cfg.get("loud_commands", []):
+        if stripped == loud or stripped.startswith(loud + " "):
+            backend, _ = core.usable_backend(cfg)
+            if backend is None:
+                allow()
+            deny(
+                f"`{stripped[:60]}` prints its whole run into context, and it stays "
+                f"there for the rest of the session.\n\n"
+                f"Run it through the worker instead - same command, same exit code, "
+                f"only the failure comes back:\n"
+                f"  {COFLOAD_BIN} run {shlex.quote(stripped)}\n\n"
+                f"Short output is passed through unchanged, so nothing is lost. "
+                f"To see the raw output anyway, narrow it yourself with a pipe "
+                f"(| tail -50, | grep -E 'error|fail')."
+            )
+    return
+
+
 def main() -> None:
     try:
         event = json.load(sys.stdin)
@@ -100,6 +125,7 @@ def main() -> None:
         # A pipe means the output is already being narrowed; leave it alone.
         if any(ch in command for ch in "|><") or "cofload" in command:
             allow()
+        check_loud(command, cfg)
         try:
             parts = shlex.split(command)
         except ValueError:
