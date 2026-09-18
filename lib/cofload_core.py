@@ -21,7 +21,9 @@ from pathlib import Path
 
 CONFIG_NAME = ".cofload.json"
 USER_CONFIG = Path.home() / ".config" / "cofload" / "config.json"
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "cofload"
+# `or`, not a default argument: an XDG_CACHE_HOME set to "" would otherwise
+# become Path(""), which is the working directory.
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "cofload"
 
 # Files whose contents must never leave the machine through a worker, and which
 # the guard therefore never blocks either: Claude reads them itself or not at all.
@@ -112,23 +114,39 @@ def repo_root(start: Path | None = None) -> Path:
 
 
 def load_config(cwd: Path | None = None) -> dict:
-    cfg = dict(DEFAULTS)
+    import copy
+    cfg = copy.deepcopy(DEFAULTS)
     for path in (USER_CONFIG, repo_root(cwd) / CONFIG_NAME):
         cfg.update(_read_json(path))
     if os.environ.get("COFLOAD_CONFIG"):
         cfg.update(_read_json(Path(os.environ["COFLOAD_CONFIG"])))
     # Environment wins, so a single session can be steered without editing files.
-    if os.environ.get("COFLOAD_MIN_LINES"):
-        cfg["min_lines"] = int(os.environ["COFLOAD_MIN_LINES"])
-    if os.environ.get("COFLOAD_MIN_BYTES"):
-        cfg["min_bytes"] = int(os.environ["COFLOAD_MIN_BYTES"])
+    for var, key in (("COFLOAD_MIN_LINES", "min_lines"),
+                     ("COFLOAD_MIN_BYTES", "min_bytes"),
+                     ("COFLOAD_TIMEOUT", "timeout_seconds")):
+        if os.environ.get(var):
+            cfg[key] = _as_int(os.environ[var], DEFAULTS[key])
     if os.environ.get("COFLOAD_BACKEND"):
         cfg["backend"] = os.environ["COFLOAD_BACKEND"]
     if os.environ.get("COFLOAD_MODEL"):
         cfg["model"] = os.environ["COFLOAD_MODEL"]
     if os.environ.get("COFLOAD_PRIVACY"):
         cfg["privacy"] = os.environ["COFLOAD_PRIVACY"]
+    # A repository config can carry strings where numbers belong.
+    for key in ("min_lines", "min_bytes", "timeout_seconds"):
+        cfg[key] = max(1, _as_int(cfg.get(key), DEFAULTS[key]))
+    if not isinstance(cfg.get("backends"), dict):
+        cfg["backends"] = {}
     return cfg
+
+
+def _as_int(value, fallback: int) -> int:
+    """Settings arrive from JSON files and the environment, where a number is
+    often a string and sometimes nonsense. The guard must not die over it."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _read_json(path: Path) -> dict:
@@ -139,9 +157,14 @@ def _read_json(path: Path) -> dict:
 
 
 def matches(path: Path, patterns) -> bool:
-    p = str(path)
-    name = path.name
-    for pat in patterns:
+    """Case-insensitive on purpose: APFS and NTFS treat .env and .ENV as the
+    same file, and a secret pattern that misses .ENV is worse than useless."""
+    if isinstance(patterns, str):  # a single pattern in the config, not a list
+        patterns = [patterns]
+    p = str(path).casefold()
+    name = path.name.casefold()
+    for pat in patterns or []:
+        pat = str(pat).casefold()
         if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(name, pat.lstrip("*/")):
             return True
     return False
@@ -189,9 +212,9 @@ def _cached_get(url: str, ttl: int = 120, timeout: float = 1.0):
     path = CACHE_DIR / f"probe_{key}.json"
     try:
         cached = json.loads(path.read_text())
-        if cached.get("at", 0) + ttl > time.time():
+        if float(cached.get("at", 0)) + ttl > time.time():
             return cached.get("data")
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError, TypeError):
         pass
     import urllib.error
     import urllib.request
@@ -202,7 +225,10 @@ def _cached_get(url: str, ttl: int = 120, timeout: float = 1.0):
         data = None
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"at": time.time(), "data": data}))
+        # A failure is remembered far more briefly than a success: one blip
+        # should not blank out a working backend for two minutes.
+        stamp = time.time() if data is not None else time.time() - ttl + 15
+        path.write_text(json.dumps({"at": stamp, "data": data}))
     except OSError:
         pass
     return data
@@ -214,9 +240,11 @@ def _local_models(kind: str, host: str, port: int) -> list:
     once the first delegation is already under way."""
     if kind == "ollama":
         data = _cached_get(f"http://{host}:{port}/api/tags")
-        return [m.get("name") for m in (data or {}).get("models", []) if m.get("name")]
+        items = (data or {}).get("models") or [] if isinstance(data, dict) else []
+        return [m.get("name") for m in items if isinstance(m, dict) and m.get("name")]
     data = _cached_get(f"http://{host}:{port}/v1/models")
-    return [m.get("id") for m in (data or {}).get("data", []) if m.get("id")]
+    items = (data or {}).get("data") or [] if isinstance(data, dict) else []
+    return [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
 
 
 def _gemini_key() -> str | None:
@@ -225,10 +253,13 @@ def _gemini_key() -> str | None:
             return os.environ[var]
     keychain = os.environ.get("COFLOAD_GEMINI_KEYCHAIN_ITEM")
     if keychain and sys.platform == "darwin" and shutil.which("security"):
-        out = subprocess.run(
-            ["security", "find-generic-password", "-w", "-s", keychain],
-            capture_output=True, text=True,
-        )
+        try:
+            out = subprocess.run(
+                ["security", "find-generic-password", "-w", "-s", keychain],
+                capture_output=True, text=True, timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
     return None
@@ -245,12 +276,21 @@ def detect(name: str, cfg: dict) -> Backend | None:
         if not _port_open(host, port):
             return None
         available = _local_models(name, host, port)
+        if not available:
+            # Listening with nothing loaded. Reporting the backend as available
+            # here is how a placeholder model name reached the first delegation.
+            return None
         wanted = model or over.get("model")
-        if wanted and available and wanted not in available:
-            return None  # configured model is not loaded; do not pretend otherwise
-        chosen = wanted or (available[0] if available else None)
-        if not chosen:
-            return None  # listening, but nothing to answer with
+        if wanted:
+            # ollama reports "llama3:latest" for what everyone writes as "llama3".
+            match = next((m for m in available
+                          if m == wanted or m.split(":")[0] == wanted.split(":")[0]),
+                         None)
+            if not match:
+                return None
+            chosen = match
+        else:
+            chosen = available[0]
         return Backend(name, chosen, True, f"{host}:{port} · {len(available)} loaded",
                        {"host": host, "port": port})
 
@@ -367,8 +407,15 @@ def run_worker(backend: Backend, prompt: str, cfg: dict) -> str:
     if backend.name == "commandcode":
         # A headless run withholds tools by default, which is what we want here:
         # the worker answers about the text it was handed, it does not explore.
+        # --trust: a headless run in an unfamiliar directory otherwise stops at
+        # the project permission prompt and returns an empty failure. Nothing is
+        # delegated but text here, and the run gets no tools.
         return _run_cli([backend.extra["exe"], "-p", prompt, "-m", backend.model,
-                         "--no-session", "--skip-onboarding", "--max-turns", "1"], timeout)
+                         "--no-session", "--skip-onboarding", "--trust",
+                         # A turn cap of 1 exits 8 ("reached maximum conversation
+                         # turns") for anything the model does not answer in one
+                         # step - reads survived it, writing a file did not.
+                         "--max-turns", "6"], timeout)
     if backend.name == "agy":
         # --disable-slash-commands matters: file content lands inside the prompt,
         # and a line starting with "/" in that content must stay text.
@@ -397,9 +444,11 @@ def _http_json(url: str, payload: dict, timeout: int, pick, headers: dict | None
                            f"{exc.read()[:300].decode(errors='replace')}") from None
     except (urllib.error.URLError, TimeoutError) as exc:
         raise CofloadError(f"could not reach {url.split('/')[2]}: {exc}") from None
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise CofloadError(f"{url.split('/')[2]} returned unreadable JSON: {exc}") from None
     try:
         return pick(data).strip()
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, AttributeError):
         raise CofloadError(f"unexpected response shape: {json.dumps(data)[:300]}") from None
 
 
@@ -409,9 +458,18 @@ def _run_cli(cmd: list[str], timeout: int) -> str:
     except FileNotFoundError:
         raise CofloadError(f"{cmd[0]} not found on PATH") from None
     except subprocess.TimeoutExpired:
-        raise CofloadError(f"{cmd[0]} timed out after {timeout}s") from None
+        raise CofloadError(
+            f"{cmd[0]} timed out after {timeout}s — an analytical question over a "
+            f"large file can need longer; raise timeout_seconds or set "
+            f"COFLOAD_TIMEOUT") from None
     out = _strip_ansi(proc.stdout)
-    if proc.returncode != 0 or "Error:" in out[:400]:
+    # opencode reports some failures on stdout with exit code 0, so the output
+    # has to be inspected - but only as a line of its own among the first few.
+    # Matching "Error:" anywhere used to fail every answer that merely
+    # described one, which is exactly what `cofload run` asks the worker for.
+    head = [ln.strip() for ln in out.splitlines()[:6] if ln.strip()]
+    looks_failed = any(ln.startswith(("Error:", "error:", "✘", "ERROR:")) for ln in head)
+    if proc.returncode != 0 or looks_failed:
         detail = (out or _strip_ansi(proc.stderr)).strip()
         raise CofloadError(f"{cmd[0]} failed: {detail[:400]}")
     return _strip_cli_chrome(out)

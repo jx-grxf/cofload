@@ -102,7 +102,8 @@ def usage_counts(days: int = 60) -> dict:
         return counts
     cutoff = time.time() - days * 86400
     patterns = {
-        "mcp": re.compile(rb'"name":"mcp__([a-zA-Z0-9_-]+)__'),
+        # Non-greedy: with a greedy class, "mcp__a__b__c" credits server "a__b".
+        "mcp": re.compile(rb'"name":"mcp__([a-zA-Z0-9_-]+?)__'),
         "skill": re.compile(rb'"name":"Skill","input":\{"skill":"([a-zA-Z0-9:_-]+)"'),
         "agent": re.compile(rb'"subagent_type":"([a-zA-Z0-9:_-]+)"'),
     }

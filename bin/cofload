@@ -84,12 +84,28 @@ def _wrap(path: Path, text: str) -> str:
     return f"<file path=\"{path}\">\n{text}\n</file>\n"
 
 
+def _days(argv, default: int) -> int:
+    """--days=N, tolerant of nonsense: a report is not worth a traceback."""
+    raw = next((a.split("=", 1)[1] for a in argv if a.startswith("--days=")), None)
+    try:
+        return max(1, int(raw)) if raw else default
+    except (TypeError, ValueError):
+        print(f"cofload: ignoring --days={raw!r}, using {default}", file=sys.stderr)
+        return default
+
+
 def cmd_read(argv) -> int:
     if "--" in argv:
         split = argv.index("--")
         files, question = argv[:split], " ".join(argv[split + 1:])
     else:
         files, question = argv[:-1], argv[-1] if argv else ""
+        if question and Path(question).is_file():
+            # Without `--`, the last argument is read as the question; when it
+            # is a file, the question was forgotten rather than written.
+            print("cofload: no question given. Use: cofload read <file...> -- "
+                  "\"<question>\"", file=sys.stderr)
+            return 2
     if not files or not question:
         print("usage: cofload read <file...> -- <question>", file=sys.stderr)
         return 2
@@ -120,7 +136,7 @@ def cmd_read(argv) -> int:
             print(f"cofload: {exc}", file=sys.stderr)
             return 2
         numbered = "\n".join(f"{i:>6}  {ln}" for i, ln in enumerate(text.splitlines(), 1))
-        total_lines += text.count("\n")
+        total_lines += len(text.splitlines())
         total_bytes += len(numbered)
         blobs.append(_wrap(path, numbered))
 
@@ -161,7 +177,11 @@ def cmd_write(argv) -> int:
               file=sys.stderr)
         return 2
     spec_path, target = Path(argv[0]), Path(argv[1])
-    refs = [Path(a) for a in argv[2:]]
+    refs = [Path(a) for a in argv[2:] if not a.startswith("--")]
+    if target.exists() and "--force" not in argv:
+        print(f"cofload: {target} already exists; pass --force to replace it",
+              file=sys.stderr)
+        return 5
     cfg = core.load_config()
     backend, why = core.usable_backend(cfg)
     if backend is None:
@@ -197,8 +217,12 @@ def cmd_write(argv) -> int:
         lines = lines[1:]
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines).rstrip() + "\n")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines).rstrip() + "\n")
+    except OSError as exc:
+        print(f"cofload: could not write {target}: {exc}", file=sys.stderr)
+        return 2
     core.record_stat(kind="write", ok=True, backend=backend.name, model=backend.model,
                      paths=[target.name], lines=len(lines),
                      chars_out=sum(len(x) for x in lines),
@@ -284,7 +308,7 @@ def cmd_stats(argv) -> int:
         print("nothing delegated yet")
         return 0
 
-    days = int(next((a.split("=")[1] for a in argv if a.startswith("--days=")), 0) or 0)
+    days = _days(argv, 0) if any(a.startswith("--days=") for a in argv) else 0
     if days:
         cutoff = time.time() - days * 86400
         records = [r for r in records if r.get("ts", 0) >= cutoff]
@@ -295,7 +319,7 @@ def cmd_stats(argv) -> int:
     done = [r for r in records if r.get("ok") is not False]
     failed = [r for r in records if r.get("ok") is False]
     kinds = {}
-    for r in records:
+    for r in done:
         kinds[r.get("kind", "?")] = kinds.get(r.get("kind", "?"), 0) + 1
 
     tokens_in = sum(core.est_tokens(r.get("chars_in", 0)) for r in done)
@@ -323,7 +347,7 @@ def cmd_stats(argv) -> int:
     if tokens_in:
         cells = 30
         kept = int(round(tokens_out / tokens_in * cells)) if tokens_in else 0
-        kept = max(1, kept) if tokens_out else 0
+        kept = min(cells, max(1, kept)) if tokens_out else 0
         print("  " + ui.c("█" * (cells - kept), "green")
               + ui.c("█" * kept, "yellow")
               + f"  {saved * 100 // tokens_in}% " + ui.c("of a direct read avoided", "grey"))
@@ -357,11 +381,16 @@ def cmd_stats(argv) -> int:
 
     by_file = {}
     for r in done:
-        for name in r.get("paths", []) or []:
+        names = r.get("paths", []) or []
+        # Split across the files of one call: crediting each with the whole
+        # saving made a five-file read look like five times the win.
+        share = (max(0, core.est_tokens(r.get("chars_in", 0))
+                     - core.est_tokens(r.get("chars_out", 0))) // len(names)
+                 if names else 0)
+        for name in names:
             agg = by_file.setdefault(name, {"n": 0, "saved": 0})
             agg["n"] += 1
-            agg["saved"] += max(0, core.est_tokens(r.get("chars_in", 0))
-                                - core.est_tokens(r.get("chars_out", 0)))
+            agg["saved"] += share
     top_files = sorted(by_file.items(), key=lambda kv: -kv[1]["saved"])[:6]
     if top_files:
         top = top_files[0][1]["saved"] or 1
@@ -444,7 +473,8 @@ def cmd_run(argv) -> int:
     if len(body) > limit:
         # Keep both ends: the failure is usually at the end, the cause often
         # at the beginning.
-        body = body[: limit // 2] + "\n...[trimmed]...\n" + body[-limit // 2:]
+        half = max(1, limit // 2)
+        body = body[:half] + "\n...[trimmed]...\n" + body[-half:]
     prompt = RUN_PROMPT.format(command=command, code=proc.returncode, output=body)
     if question:
         prompt += f"\n\nAlso answer: {question}"
@@ -489,7 +519,7 @@ def cmd_audit(argv) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
     import cofload_audit as audit
 
-    days = int(next((a.split("=")[1] for a in argv if a.startswith("--days=")), 60))
+    days = _days(argv, 60)
     print(ui.c("  reading plugin inventory and transcripts…", "grey"),
           file=sys.stderr, flush=True)
     rep = audit.report(Path.cwd(), days)
@@ -581,7 +611,7 @@ def cmd_usage(argv) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
     import cofload_usage as usage
 
-    days = int(next((a.split("=")[1] for a in argv if a.startswith("--days=")), 7))
+    days = _days(argv, 7)
     project = next((a.split("=")[1] for a in argv if a.startswith("--project=")), None)
     data = usage.collect(days, project)
     total = data["total"]
@@ -657,10 +687,20 @@ def cmd_tui(_argv) -> int:
 def cmd_harden(argv) -> int:
     """Write permission deny rules for paths that are never worth reading."""
     target = Path.cwd() / ".claude" / "settings.json"
+    existed = target.exists()
     try:
-        settings = json.loads(target.read_text())
-    except (OSError, ValueError):
-        settings = {}
+        settings = json.loads(target.read_text()) if existed else {}
+    except OSError as exc:
+        print(f"cofload: cannot read {target}: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        # Writing a fresh file here would silently drop every existing setting.
+        print(f"cofload: {target} is not valid JSON ({exc}); fix it first",
+              file=sys.stderr)
+        return 2
+    if not isinstance(settings, dict):
+        print(f"cofload: {target} does not contain a JSON object", file=sys.stderr)
+        return 2
     perms = settings.setdefault("permissions", {})
     deny = perms.setdefault("deny", [])
     missing = [rule for rule in DENY_DEFAULTS if rule not in deny]
@@ -673,13 +713,17 @@ def cmd_harden(argv) -> int:
             print(f"  {rule}")
         print("\nrun with --write to apply")
         return 0
-    if target.exists():
-        backup = target.with_suffix(".json.bak")
-        backup.write_text(target.read_text())
-        print(f"backup: {backup}")
-    deny.extend(missing)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(settings, indent=2) + "\n")
+    try:
+        if existed:
+            backup = target.with_suffix(".json.bak")
+            backup.write_text(target.read_text())
+            print(f"backup: {backup}")
+        deny.extend(missing)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(settings, indent=2) + "\n")
+    except OSError as exc:
+        print(f"cofload: could not write {target}: {exc}", file=sys.stderr)
+        return 2
     print(f"added {len(missing)} deny rule(s) to {target}")
     return 0
 
@@ -724,7 +768,10 @@ def main() -> int:
     if cmd is None:
         print(f"cofload: unknown command {argv[0]!r}", file=sys.stderr)
         return 2
-    return cmd([a for a in argv[1:] if a != "--probe"])
+    rest = argv[1:]
+    if argv[0] == "doctor":
+        rest = [a for a in rest if a != "--probe"]
+    return cmd(rest)
 
 
 if __name__ == "__main__":
