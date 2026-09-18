@@ -37,7 +37,7 @@ def main() -> int:
         before = est_tokens(raw)
         started = time.time()
         proc = subprocess.run(
-            [str(ROOT / "bin" / "offload"), "read", str(f), "--", question],
+            [str(ROOT / "bin" / "cofload"), "read", str(f), "--", question],
             capture_output=True, text=True,
         )
         elapsed = time.time() - started
@@ -52,7 +52,7 @@ def main() -> int:
 
     if not rows:
         return 1
-    print(f"{'file':<34}{'lines':>7}{'direct':>9}{'offload':>9}{'saved':>8}{'time':>8}")
+    print(f"{'file':<34}{'lines':>7}{'direct':>9}{'cofload':>9}{'saved':>8}{'time':>8}")
     for name, lines, before, after, elapsed in rows:
         print(f"{name[:33]:<34}{lines:>7}{before:>9}{after:>9}"
               f"{100 - after * 100 // before:>7}%{elapsed:>7.1f}s")

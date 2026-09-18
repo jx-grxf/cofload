@@ -20,11 +20,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-import offload_core as core  # noqa: E402
+import cofload_core as core  # noqa: E402
 
 BYPASS = core.CACHE_DIR / "bypass.json"
 READ_COMMANDS = {"cat", "head", "tail", "less", "more", "bat", "nl"}
-OFFLOAD_BIN = str(Path(__file__).resolve().parent.parent / "bin" / "offload")
+COFLOAD_BIN = str(Path(__file__).resolve().parent.parent / "bin" / "cofload")
 
 
 def allow() -> None:
@@ -69,10 +69,10 @@ def check(path: Path, cfg: dict, how: str) -> None:
         f"roughly {size // 4000}k tokens of context, and that context stays for "
         f"the rest of the session.\n\n"
         f"Ask the cheap worker instead ({backend.name}: {backend.model}):\n"
-        f"  {OFFLOAD_BIN} read {shlex.quote(str(path))} -- \"<your question>\"\n\n"
+        f"  {COFLOAD_BIN} read {shlex.quote(str(path))} -- \"<your question>\"\n\n"
         f"If you need the literal lines (to edit them), use a targeted read "
         f"({how}) or run:\n"
-        f"  {OFFLOAD_BIN} allow {shlex.quote(str(path))}"
+        f"  {COFLOAD_BIN} allow {shlex.quote(str(path))}"
     )
 
 
@@ -98,7 +98,7 @@ def main() -> None:
     if tool == "Bash":
         command = args.get("command", "")
         # A pipe means the output is already being narrowed; leave it alone.
-        if any(ch in command for ch in "|><") or "offload" in command:
+        if any(ch in command for ch in "|><") or "cofload" in command:
             allow()
         try:
             parts = shlex.split(command)

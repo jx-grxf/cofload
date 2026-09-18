@@ -1,13 +1,13 @@
 {
-  "name": "offload",
-  "displayName": "Offload",
+  "name": "cofload",
+  "displayName": "Cofload",
   "owner": {
     "name": "Johannes Grof"
   },
   "plugins": [
     {
-      "name": "offload",
-      "displayName": "Offload",
+      "name": "cofload",
+      "displayName": "Cofload",
       "description": "Route bulk file reads and boilerplate writes to a cheap model.",
       "source": "./"
     }

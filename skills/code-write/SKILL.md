@@ -18,7 +18,7 @@ Fields: id (string), name (string), departures (array of Departure), updatedAt (
 Follow the export style and naming of the reference file exactly.
 SPEC
 
-"${CLAUDE_PLUGIN_ROOT}/bin/offload" write /tmp/spec.md src/schemas/station-board.ts src/schemas/journey.ts
+"${CLAUDE_PLUGIN_ROOT}/bin/cofload" write /tmp/spec.md src/schemas/station-board.ts src/schemas/journey.ts
 ```
 
 Arguments: spec file, target path, then any reference files.

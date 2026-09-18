@@ -11,8 +11,8 @@ it instead and returns bullets, which is roughly two percent of the tokens.
 ## Use it
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/offload" read path/to/file.ts -- "Which handlers touch the quota cache, and where?"
-"${CLAUDE_PLUGIN_ROOT}/bin/offload" read a.ts b.ts -- "Where do these two disagree about the retry policy?"
+"${CLAUDE_PLUGIN_ROOT}/bin/cofload" read path/to/file.ts -- "Which handlers touch the quota cache, and where?"
+"${CLAUDE_PLUGIN_ROOT}/bin/cofload" read a.ts b.ts -- "Where do these two disagree about the retry policy?"
 ```
 
 Ask one specific question. "Summarize this file" wastes the round trip; the
@@ -26,14 +26,14 @@ targeted `Read` with `offset`/`limit` rather than a whole-file read.
 ## When not to use it
 
 - **You are about to edit the file.** You need the literal lines. Use a targeted
-  `Read`, or `offload allow <file>` to lift the guard for half an hour.
+  `Read`, or `cofload allow <file>` to lift the guard for half an hour.
 - **The question is architectural.** A worker on low effort is an extractor, not
   a designer. Read the relevant section yourself and think about it.
-- **The file holds secrets.** `offload` refuses those outright, and the guard
+- **The file holds secrets.** `cofload` refuses those outright, and the guard
   never blocks them, so read them directly or not at all.
 
 ## When the worker is down
 
-Every failure path calls `offload allow` on the files first, so the direct read
+Every failure path calls `cofload allow` on the files first, so the direct read
 goes through immediately afterwards. A broken worker slows a session down; it
 never blocks one.

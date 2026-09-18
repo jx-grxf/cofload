@@ -1,4 +1,4 @@
-"""Shared logic for the offload CLI and the PreToolUse guard.
+"""Shared logic for the cofload CLI and the PreToolUse guard.
 
 Standard library only, on purpose: the guard runs before every Read and Bash
 call, so an import that pulls in a dependency tree would tax every tool call in
@@ -18,9 +18,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CONFIG_NAME = ".offload.json"
-USER_CONFIG = Path.home() / ".config" / "offload" / "config.json"
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "offload"
+CONFIG_NAME = ".cofload.json"
+USER_CONFIG = Path.home() / ".config" / "cofload" / "config.json"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "cofload"
 
 # Files whose contents must never leave the machine through a worker, and which
 # the guard therefore never blocks either: Claude reads them itself or not at all.
@@ -75,7 +75,7 @@ PRIVACY_ALLOWS = {
 }
 
 
-class OffloadError(RuntimeError):
+class CofloadError(RuntimeError):
     pass
 
 
@@ -100,19 +100,19 @@ def load_config(cwd: Path | None = None) -> dict:
     cfg = dict(DEFAULTS)
     for path in (USER_CONFIG, repo_root(cwd) / CONFIG_NAME):
         cfg.update(_read_json(path))
-    if os.environ.get("OFFLOAD_CONFIG"):
-        cfg.update(_read_json(Path(os.environ["OFFLOAD_CONFIG"])))
+    if os.environ.get("COFLOAD_CONFIG"):
+        cfg.update(_read_json(Path(os.environ["COFLOAD_CONFIG"])))
     # Environment wins, so a single session can be steered without editing files.
-    if os.environ.get("OFFLOAD_MIN_LINES"):
-        cfg["min_lines"] = int(os.environ["OFFLOAD_MIN_LINES"])
-    if os.environ.get("OFFLOAD_MIN_BYTES"):
-        cfg["min_bytes"] = int(os.environ["OFFLOAD_MIN_BYTES"])
-    if os.environ.get("OFFLOAD_BACKEND"):
-        cfg["backend"] = os.environ["OFFLOAD_BACKEND"]
-    if os.environ.get("OFFLOAD_MODEL"):
-        cfg["model"] = os.environ["OFFLOAD_MODEL"]
-    if os.environ.get("OFFLOAD_PRIVACY"):
-        cfg["privacy"] = os.environ["OFFLOAD_PRIVACY"]
+    if os.environ.get("COFLOAD_MIN_LINES"):
+        cfg["min_lines"] = int(os.environ["COFLOAD_MIN_LINES"])
+    if os.environ.get("COFLOAD_MIN_BYTES"):
+        cfg["min_bytes"] = int(os.environ["COFLOAD_MIN_BYTES"])
+    if os.environ.get("COFLOAD_BACKEND"):
+        cfg["backend"] = os.environ["COFLOAD_BACKEND"]
+    if os.environ.get("COFLOAD_MODEL"):
+        cfg["model"] = os.environ["COFLOAD_MODEL"]
+    if os.environ.get("COFLOAD_PRIVACY"):
+        cfg["privacy"] = os.environ["COFLOAD_PRIVACY"]
     return cfg
 
 
@@ -165,10 +165,10 @@ def _port_open(host: str, port: int, timeout: float = 0.25) -> bool:
 
 
 def _gemini_key() -> str | None:
-    for var in ("OFFLOAD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
+    for var in ("COFLOAD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
         if os.environ.get(var):
             return os.environ[var]
-    keychain = os.environ.get("OFFLOAD_GEMINI_KEYCHAIN_ITEM")
+    keychain = os.environ.get("COFLOAD_GEMINI_KEYCHAIN_ITEM")
     if keychain and sys.platform == "darwin" and shutil.which("security"):
         out = subprocess.run(
             ["security", "find-generic-password", "-w", "-s", keychain],
@@ -324,7 +324,7 @@ def run_worker(backend: Backend, prompt: str, cfg: dict) -> str:
         cmd = [c.replace("{model}", backend.model) for c in backend.extra["command"]]
         cmd = [c.replace("{prompt}", prompt) for c in cmd]
         return _run_cli(cmd, timeout)
-    raise OffloadError(f"unknown backend: {backend.name}")
+    raise CofloadError(f"unknown backend: {backend.name}")
 
 
 def _http_json(url: str, payload: dict, timeout: int, pick, headers: dict | None = None) -> str:
@@ -339,27 +339,27 @@ def _http_json(url: str, payload: dict, timeout: int, pick, headers: dict | None
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        raise OffloadError(f"{url.split('/')[2]} returned {exc.code}: "
+        raise CofloadError(f"{url.split('/')[2]} returned {exc.code}: "
                            f"{exc.read()[:300].decode(errors='replace')}") from None
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise OffloadError(f"could not reach {url.split('/')[2]}: {exc}") from None
+        raise CofloadError(f"could not reach {url.split('/')[2]}: {exc}") from None
     try:
         return pick(data).strip()
     except (KeyError, IndexError, TypeError):
-        raise OffloadError(f"unexpected response shape: {json.dumps(data)[:300]}") from None
+        raise CofloadError(f"unexpected response shape: {json.dumps(data)[:300]}") from None
 
 
 def _run_cli(cmd: list[str], timeout: int) -> str:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        raise OffloadError(f"{cmd[0]} not found on PATH") from None
+        raise CofloadError(f"{cmd[0]} not found on PATH") from None
     except subprocess.TimeoutExpired:
-        raise OffloadError(f"{cmd[0]} timed out after {timeout}s") from None
+        raise CofloadError(f"{cmd[0]} timed out after {timeout}s") from None
     out = _strip_ansi(proc.stdout)
     if proc.returncode != 0 or "Error:" in out[:400]:
         detail = (out or _strip_ansi(proc.stderr)).strip()
-        raise OffloadError(f"{cmd[0]} failed: {detail[:400]}")
+        raise CofloadError(f"{cmd[0]} failed: {detail[:400]}")
     return _strip_cli_chrome(out)
 
 
@@ -383,12 +383,23 @@ def cache_path(key: str) -> Path:
     return CACHE_DIR / f"{key}.json"
 
 
-def record_stat(kind: str, saved_lines: int, backend: str) -> None:
-    """Append-only usage log, so the savings claim can be checked later."""
+def record_stat(**fields) -> None:
+    """Append-only usage log, so the savings claim can be checked later.
+
+    One JSON object per delegation. Written even when the worker fails, because
+    a failure is the interesting half of the record.
+    """
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        fields.setdefault("ts", int(time.time()))
         with (CACHE_DIR / "usage.jsonl").open("a") as fh:
-            fh.write(json.dumps({"ts": int(time.time()), "kind": kind,
-                                 "lines": saved_lines, "backend": backend}) + "\n")
+            fh.write(json.dumps(fields) + "\n")
     except OSError:
         pass
+
+
+def est_tokens(text) -> int:
+    """Characters / 4. An estimate, not the model's tokenizer - and labelled
+    as such everywhere it is shown."""
+    n = text if isinstance(text, int) else len(text)
+    return max(0, n // 4)

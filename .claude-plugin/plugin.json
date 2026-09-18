@@ -1,6 +1,6 @@
 {
-  "name": "offload",
-  "displayName": "Offload",
+  "name": "cofload",
+  "displayName": "Cofload",
   "version": "0.1.0",
   "description": "Route bulk file reads and boilerplate writes to a cheap model, enforced by hooks instead of instructions.",
   "license": "MIT",
@@ -15,5 +15,5 @@
     "name": "Johannes Grof",
     "url": "https://github.com/jx-grxf"
   },
-  "repository": "https://github.com/jx-grxf/offload"
+  "repository": "https://github.com/jx-grxf/cofload"
 }
