@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -178,6 +179,46 @@ def _port_open(host: str, port: int, timeout: float = 0.25) -> bool:
         return False
 
 
+def _cached_get(url: str, ttl: int = 120, timeout: float = 1.0):
+    """GET a small JSON document, remembered briefly.
+
+    The guard runs before every Read, so asking a local server what it has
+    loaded must not cost a network round trip each time.
+    """
+    key = re.sub(r"[^a-z0-9]+", "_", url.lower())
+    path = CACHE_DIR / f"probe_{key}.json"
+    try:
+        cached = json.loads(path.read_text())
+        if cached.get("at", 0) + ttl > time.time():
+            return cached.get("data")
+    except (OSError, ValueError):
+        pass
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        data = None
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"at": time.time(), "data": data}))
+    except OSError:
+        pass
+    return data
+
+
+def _local_models(kind: str, host: str, port: int) -> list:
+    """Which models a local server actually has. An open port is not an answer:
+    LM Studio listens with nothing loaded, and a made-up model name fails only
+    once the first delegation is already under way."""
+    if kind == "ollama":
+        data = _cached_get(f"http://{host}:{port}/api/tags")
+        return [m.get("name") for m in (data or {}).get("models", []) if m.get("name")]
+    data = _cached_get(f"http://{host}:{port}/v1/models")
+    return [m.get("id") for m in (data or {}).get("data", []) if m.get("id")]
+
+
 def _gemini_key() -> str | None:
     for var in ("COFLOAD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
         if os.environ.get(var):
@@ -198,21 +239,20 @@ def detect(name: str, cfg: dict) -> Backend | None:
     over = cfg.get("backends", {}).get(name, {})
     model = cfg.get("model") or over.get("model")
 
-    if name == "ollama":
+    if name in ("ollama", "lmstudio"):
         host = over.get("host", "127.0.0.1")
-        port = int(over.get("port", 11434))
-        if _port_open(host, port):
-            return Backend(name, model or over.get("model") or "qwen2.5-coder:14b", True,
-                           f"{host}:{port}", {"host": host, "port": port})
-        return None
-
-    if name == "lmstudio":
-        host = over.get("host", "127.0.0.1")
-        port = int(over.get("port", 1234))
-        if _port_open(host, port):
-            return Backend(name, model or "local-model", True, f"{host}:{port}",
-                           {"host": host, "port": port})
-        return None
+        port = int(over.get("port", 11434 if name == "ollama" else 1234))
+        if not _port_open(host, port):
+            return None
+        available = _local_models(name, host, port)
+        wanted = model or over.get("model")
+        if wanted and available and wanted not in available:
+            return None  # configured model is not loaded; do not pretend otherwise
+        chosen = wanted or (available[0] if available else None)
+        if not chosen:
+            return None  # listening, but nothing to answer with
+        return Backend(name, chosen, True, f"{host}:{port} · {len(available)} loaded",
+                       {"host": host, "port": port})
 
     if name == "gemini":
         key = _gemini_key()
@@ -378,7 +418,6 @@ def _run_cli(cmd: list[str], timeout: int) -> str:
 
 
 def _strip_ansi(text: str) -> str:
-    import re
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
 
 
