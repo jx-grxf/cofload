@@ -1,7 +1,7 @@
 {
   "name": "cofload",
   "displayName": "Cofload",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Keep context small: hooks route bulk reads and loud commands to a cheap model, and audit what every session costs.",
   "license": "MIT",
   "keywords": [

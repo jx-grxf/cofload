@@ -569,6 +569,91 @@ def cmd_audit(argv) -> int:
     return 0
 
 
+def _big(n: int) -> str:
+    """Token counts here reach into the billions; 1,393,526,090 is unreadable."""
+    for limit, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= limit:
+            return f"{n / limit:.1f}{suffix}"
+    return str(int(n))
+
+
+def cmd_usage(argv) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    import cofload_usage as usage
+
+    days = int(next((a.split("=")[1] for a in argv if a.startswith("--days=")), 7))
+    project = next((a.split("=")[1] for a in argv if a.startswith("--project=")), None)
+    data = usage.collect(days, project)
+    total = data["total"]
+    if not total["messages"]:
+        print(f"no usage recorded in the last {days} days")
+        return 0
+
+    ui.title("cofload usage", f"{days} days · {data['files']} transcripts")
+    ui.section("billed", f"{_big(usage.billed(total))} tokens")
+    parts = [("cache read", total["cache_read"], "green"),
+             ("cache write", total["cache_write"], "yellow"),
+             ("output", total["output"], "cyan"),
+             ("fresh input", total["input"], "cyan")]
+    peak = max(v for _, v, _ in parts) or 1
+    billed_total = usage.billed(total) or 1
+    for label, value, colour in parts:
+        print("  " + ui.bar(value, peak, 22, colour) + "  " + ui.cell(label, 14)
+              + f"{_big(value):>9}" + ui.c(f"   {value * 100 / billed_total:.1f}%", "grey"))
+    print()
+    ratio = usage.cache_ratio(total)
+    level = "green" if ratio > 0.9 else ("yellow" if ratio > 0.7 else "red")
+    ui.kv("cache ratio", ui.c(f"{ratio * 100:.1f}%", level, "bold"), 16)
+    ui.note("a cache read costs a fraction of the write that created it; a low ratio "
+            "means context is being rebuilt instead of reused")
+    ui.kv("messages", f"{total['messages']:,}", 16)
+
+    if data["by_day"]:
+        ui.section("by day")
+        peak = max(usage.billed(b) for b in data["by_day"].values()) or 1
+        for day in sorted(data["by_day"])[-10:]:
+            b = data["by_day"][day]
+            print("  " + ui.bar(usage.billed(b), peak, 22, "cyan") + "  "
+                  + ui.cell(day, 12) + f"{_big(usage.billed(b)):>9}"
+                  + ui.c(f"   {b['messages']:,} messages · "
+                         f"cache {usage.cache_ratio(b) * 100:.0f}%", "grey"))
+
+    if data["by_model"]:
+        ui.section("by model")
+        peak = max(usage.billed(b) for b in data["by_model"].values()) or 1
+        for name, b in sorted(data["by_model"].items(),
+                              key=lambda kv: -usage.billed(kv[1]))[:6]:
+            print("  " + ui.bar(usage.billed(b), peak, 22, "blue") + "  "
+                  + ui.cell(name, 26) + f"{_big(usage.billed(b)):>9}")
+
+    busiest = sorted(data["by_session"].items(),
+                     key=lambda kv: -usage.billed(kv[1]))[:6]
+    if busiest:
+        ui.section("busiest sessions")
+        peak = usage.billed(busiest[0][1]) or 1
+        for name, b in busiest:
+            label = usage.pretty_project(b["project"])
+            print("  " + ui.bar(usage.billed(b), peak, 22, "magenta") + "  "
+                  + ui.cell(label, 22) + f"{_big(usage.billed(b)):>9}"
+                  + ui.c(f"   {b['messages']:,} messages", "grey"))
+    print()
+    ui.note("read from Claude Code's own transcripts: these are real billed counts, "
+            "not estimates")
+    print()
+    return 0
+
+
+def cmd_tui(_argv) -> int:
+    """Full-screen dashboard. Everything the other commands print, live."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    if not sys.stdout.isatty():
+        print("cofload tui needs a terminal; use `cofload stats` when piping",
+              file=sys.stderr)
+        return 2
+    import cofload_tui
+    return cofload_tui.run()
+
+
 def cmd_harden(argv) -> int:
     """Write permission deny rules for paths that are never worth reading."""
     target = Path.cwd() / ".claude" / "settings.json"
@@ -601,7 +686,8 @@ def cmd_harden(argv) -> int:
 
 COMMANDS = {"read": cmd_read, "write": cmd_write, "allow": cmd_allow,
             "doctor": cmd_doctor, "stats": cmd_stats, "audit": cmd_audit,
-            "harden": cmd_harden, "run": cmd_run}
+            "harden": cmd_harden, "run": cmd_run, "tui": cmd_tui,
+            "usage": cmd_usage}
 
 
 HELP = [
@@ -612,7 +698,9 @@ HELP = [
     ("doctor [--probe]", "which workers are available here"),
     ("stats [--days=N] [--json]", "what delegation has actually saved"),
     ("audit [--days=N]", "what every session costs before you type"),
+    ("usage [--days=N]", "real billed tokens, from your own transcripts"),
     ("harden [--write]", "deny rules for paths never worth reading"),
+    ("tui", "full-screen dashboard of all of the above"),
 ]
 
 

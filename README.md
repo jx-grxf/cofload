@@ -144,6 +144,51 @@ That is why the report says "no calls found" rather than "unused". Check before
 you disable something. Disabled plugins are shown as disabled and counted as
 zero, because that is what they cost.
 
+## Usage: what you were actually billed
+
+Everywhere else this tool estimates. `cofload usage` does not — it reads the
+token counts Claude Code writes into its own transcripts:
+
+```
+BILLED                                                             1.4B tokens
+  ██████████████████████  cache read         1.4B   98.0%
+  █·····················  cache write       24.8M   1.7%
+  █·····················  output             4.3M   0.3%
+  █·····················  fresh input       10.5K   0.0%
+
+  cache ratio     98.3%
+
+BY DAY
+  ██████████████████████  2026-09-18     671.1M   2,126 messages · cache 98%
+```
+
+The cache ratio is the number to watch. A cache read costs a fraction of the
+write that created it, so a low ratio means context is being rebuilt instead of
+reused — usually a sign of sessions that restart too often, or of a setup that
+changes between turns and invalidates the cache.
+
+## Dashboard
+
+`cofload tui` puts all of it on one screen — savings, backends, stats, audit and
+usage — with `curses` from the standard library, so there is nothing to install
+and it works over ssh.
+
+## Why there is no MCP server
+
+Because it would cost what this tool exists to save. Measured on a real install:
+
+| Component | Always-on cost |
+|---|---|
+| A hook | 0 tokens — "harness-only, no model context cost" |
+| A skill | ~80–110 tokens, every session |
+| An MCP server's schemas | resolved at runtime, not counted |
+
+cofload does its work in hooks, which are free, and ships two skills for ~167
+tokens total. The same plugin exposed over MCP would add a tool list to every
+session forever, to reach a CLI that Bash can already call. For comparison: the
+vercel plugin's 3,987 tokens per session are not its MCP server at all — they
+are 35 skill descriptions at ~80–110 tokens each.
+
 ## Stats
 
 Every delegation is logged, successes and failures alike, and `cofload stats`
