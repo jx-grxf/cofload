@@ -1,0 +1,12 @@
+{
+  "privacy": "private",
+  "backend": "auto",
+  "min_lines": 350,
+  "min_bytes": 60000,
+  "timeout_seconds": 120,
+  "backends": {
+    "commandcode": { "model": "deepseek/deepseek-v4-flash" },
+    "agy": { "model": "gemini-3.8-flash-low" },
+    "ollama": { "model": "qwen2.5-coder:14b" }
+  }
+}

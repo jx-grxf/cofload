@@ -1,0 +1,19 @@
+{
+  "name": "offload",
+  "displayName": "Offload",
+  "version": "0.1.0",
+  "description": "Route bulk file reads and boilerplate writes to a cheap model, enforced by hooks instead of instructions.",
+  "license": "MIT",
+  "keywords": [
+    "tokens",
+    "context",
+    "hooks",
+    "delegation",
+    "cost"
+  ],
+  "author": {
+    "name": "Johannes Grof",
+    "url": "https://github.com/jx-grxf"
+  },
+  "repository": "https://github.com/jx-grxf/offload"
+}
